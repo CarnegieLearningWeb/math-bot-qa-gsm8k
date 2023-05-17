@@ -1,1 +1,1 @@
-# math-bot-qa-gsm8k
+# MathBot QA GSM8K
