@@ -5,7 +5,6 @@ import json
 import openai
 import tiktoken
 from dotenv import load_dotenv
-from enum import Enum
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
