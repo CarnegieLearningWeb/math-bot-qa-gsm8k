@@ -16,6 +16,7 @@ TEST_DATA_FILENAME = os.environ["TEST_DATA_FILENAME"]
 SPREADSHEET_URL = os.environ["SPREADSHEET_URL"]
 
 # For OpenAI API
+openai.organization = os.environ["OPENAI_ORG_KEY"]
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
 # Total number of tokens used
