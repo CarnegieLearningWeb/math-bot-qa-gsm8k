@@ -26,28 +26,42 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILENAME, scopes=SCOPES)
 sheets_api = build("sheets", "v4", credentials=credentials)
 
+# Maximum number of attempts to retry OpenAI API requests when an error occurs
+MAX_NUM_OPENAI_REQUESTS = 5
+
+# Maximum number of messages per conversation
+MAX_NUM_MESSAGES = 30
+
 # MathBot system prompt
 MATHBOT_SYSTEM_PROMPT = """
-You are a math tutor helping a student understand a problem. Hints may be provided for some problems; while you should not quote these hints directly, use them to guide the conversation if available.
-Break down the solution into five steps and guide the student through each, using questions (75%) and conceptual explanations (25%). Your questions should be designed such that each one requires at most a single arithmetic equation to answer. If a question naturally involves more than one equation, break it down into multiple questions.
+You are a math tutor helping a student understand a problem. Start by defining the goal of the problem and explaining what it's about to set clear expectations and context. Use this explanation to establish a foundation for the problem-solving process.
+Hints may be provided for some problems; while you should not quote these hints directly, use them to guide the conversation if available. Break down the solution into five steps and guide the student through each, using questions (75%) and conceptual explanations (25%). Your questions should be designed such that each one requires at most a single arithmetic equation to answer. If a question naturally involves more than one equation, break it down into multiple questions.
 Ensure that your responses do not exceed 100 words. Use HTML bold tags to emphasize key words or phrases.
 Never provide the final mathematical answer or reference the hints. When your question requires an arithmetic calculation, conclude your response with a single arithmetic equation that solves your question, enclosed in double angle brackets (e.g., YOUR_RESPONSE <<1+2=3>>).
 Do not include equations that cannot be validated (e.g., algebraic equations), as these will be parsed and validated by a Python function. For the same reason, avoid using mathematical constants or symbols, such as π or e, in the equations. Convert these to numbers when necessary.
 These equations will not be shown to the student, so don't reference them.
 If a response either confirms the student's final correct answer or provides the final correct answer to the problem, you should acknowledge this by ending your response with a line stating the final answer in the format "#### {Answer}". For example, if the student correctly answers "1 + 2" with "3", and this is the final answer, your response could look like this: "Excellent work, you've got it! The answer to 1 + 2 is indeed 3.\n#### 3". Ensure to follow this practice only when you're certain that the final correct answer has been reached.
-Let's work this out in a step by step way to be sure we have the right answer.
+Remember, our goal is to help the student understand the problem and the steps needed to solve it, not just to find the answer.
+Let's work this out in a step by step way to be sure we have the right understanding and solution.
+
+Example:
+Student: What is 1 + 2?
+You: This problem is about basic addition. The goal is to find the sum of 1 and 2. Can you try to add these two numbers together? <<1+2=3>>
+Student: 3
+You: Great job! That's correct. The sum of 1 and 2 is indeed 3.
+#### 3
 """
 
 # StudentBot system prompt
 STUDENTBOT_SYSTEM_PROMPT = """
 You are a K-12 student engaging with a math tutor to solve a problem. The tutor will guide you through the process using questions and concept explanations.
-Your task is to answer these questions to the best of your ability, while keeping your responses as concise and direct as possible, like the example below:
+Your task is to answer these questions to the best of your ability, while keeping your responses as concise and direct as possible.
+Remember, it's perfectly okay to say "I don't know" or ask for clarification if you're unsure about the answer. Ensure that your responses do not exceed 10 words.
+Let's work this out in a step by step way to be sure we have the right answer.
 
 Example:
 Tutor: Can you tell me what is the sum of 1 and 2?
 You: 3
-
-Let's work this out in a step by step way to be sure we have the right answer.
 """
 
 # keys: ts (message timestamp), values: equation string
@@ -116,7 +130,7 @@ def make_openai_request(messages):
     total_num_tokens_used += num_tokens_from_messages(messages)
     error_message = ""
 
-    for _ in range(3): # Try up to 3 times
+    for _ in range(MAX_NUM_OPENAI_REQUESTS):
         try:
             openai_response = openai.ChatCompletion.create(
                 model="gpt-4",
@@ -129,7 +143,7 @@ def make_openai_request(messages):
             error_message = str(e)
             print(f"\nOpenAI API Error: {error_message}\nTrying again...\n")
     
-    # If all 3 attempts failed, raise the error
+    # If all attempts failed, raise the error
     raise Exception(error_message)
 
 
@@ -143,7 +157,7 @@ def get_mathbot_answer(question):
 
         print(f"\n• StudentBot: {question}")
 
-        while len(mathbot_messages) <= 20:
+        while len(mathbot_messages) <= MAX_NUM_MESSAGES:
             # Ask the next question to MathBot
             mathbot_answer = make_openai_request(mathbot_messages)
 
@@ -154,17 +168,19 @@ def get_mathbot_answer(question):
             if mathbot_answer.endswith(">>"):
                 # Find all matches of equations
                 matches = re.findall("<<(.+?)>>", mathbot_answer)
-                if len(matches) == 1:
+                if not matches or len(matches) > 1:
+                    found_equation_error = True
+
+                # Process all equations found
+                for match in matches:
                     # Extract the equation
-                    equation = matches[0]
+                    equation = match
 
                     # Process the equation
                     processed_equation = process_equation(equation)
 
                     # Replace the old equation in MathBot answer with the processed equation
-                    mathbot_answer = re.sub("<<.+?>>$", f"<<{processed_equation}>>", mathbot_answer)
-                else:
-                    found_equation_error = True
+                    mathbot_answer = re.sub(f"<<{re.escape(equation)}>>", f"<<{processed_equation}>>", mathbot_answer)
             elif "<<" in mathbot_answer or ">>" in mathbot_answer:
                 found_equation_error = True
 
@@ -202,7 +218,7 @@ def get_mathbot_answer(question):
 
         return conversation
     except Exception as e:
-        return f"Error: {e}"
+        return f"Bug: {e}"
 
 
 def get_jsonl_data(filename):
@@ -233,15 +249,39 @@ def write_test_data_to_sheet():
             range="Sheet1",
         ).execute()
 
-        # Prepare the header
+        # Prepare the headers
         header = [["Question", "Answer", "MathBot", "Evaluation", "Results"]]
 
-        # Update the header
+        # Write the headers
         sheet.values().update(
             spreadsheetId=spreadsheet_id,
             range="Sheet1!A1:E1",
             valueInputOption="USER_ENTERED",
             body={"values": header},
+        ).execute()
+
+        # Write "Prompts" header to G1 cell
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range="Sheet1!G1",
+            valueInputOption="USER_ENTERED",
+            body={"values": [["Prompts"]]},
+        ).execute()
+
+        # Write MATHBOT_SYSTEM_PROMPT to G2 cell
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range="Sheet1!G2",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[MATHBOT_SYSTEM_PROMPT]]},
+        ).execute()
+
+        # Write STUDENTBOT_SYSTEM_PROMPT to G3 cell
+        sheet.values().update(
+            spreadsheetId=spreadsheet_id,
+            range="Sheet1!G3",
+            valueInputOption="USER_ENTERED",
+            body={"values": [[STUDENTBOT_SYSTEM_PROMPT]]},
         ).execute()
 
         # Prepare the data
